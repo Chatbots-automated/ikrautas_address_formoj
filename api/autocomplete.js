@@ -1,59 +1,55 @@
-//  /api/autocomplete.js      (deploy to your Vercel project)
+//  /api/autocomplete.js  – returns up-to-5 strings in
+//  “[street] [houseNo], [city|region]” format
 export default async function handler(req, res) {
   const t0 = Date.now();
-  res.setHeader('Access-Control-Allow-Origin', '*');      // loosen later if you wish
+  res.setHeader('Access-Control-Allow-Origin', '*');
 
-  /* ------------------------------------------------------------------ 1. validate input */
   const q = (req.query.q || '').trim();
-  console.log('[autocomplete] q =', q);
   if (q.length < 3) return res.status(400).json({ error: 'too_short' });
 
-  /* ------------------------------------------------------------------ 2. call Nominatim */
   const url =
     'https://nominatim.openstreetmap.org/search?format=json' +
-    '&addressdetails=1&limit=5&q=' + encodeURIComponent(q);
+    '&addressdetails=1&limit=10&q=' + encodeURIComponent(q);
 
   try {
     const r = await fetch(url, {
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'IkrautasAutocomplete/1.0 (+info@ikrautas.lt)'
+        'User-Agent': 'IkrautasAutocomplete/1.1 (+info@ikrautas.lt)'
       },
       timeout: 5_000
     });
-    console.log('[autocomplete] status =', r.status);
-    if (!r.ok) throw new Error('nominatim_fail');
-
+    if (!r.ok) throw new Error('nominatim_fail_' + r.status);
     const raw = await r.json();
 
-    /* ---------------------------------------------------------------- 3. shrink + format */
-    const list = raw.map(item => {
-      const a = item.address;
+    // ---- build “[street] [nr], city|region” ---------------------------
+    const pick = (o, keys) => keys.find(k => o[k]) && o[keys.find(k => o[k])];
 
-      /* 3a street part ­–––––––––––––––––––––––––––––––––––––––––––––– */
-      const road  = a.road || a.pedestrian || a.cycleway || a.footway || '';
-      const nr    = a.house_number ? ' ' + a.house_number : '';
-      const street = road ? (road + nr) : '';
+    const nice = raw.map(it => {
+      const a = it.address;
 
-      /* 3b locality part (city -> town -> village -> municipality…) –– */
-      const locality =
-        a.city        ||
-        a.town        ||
-        a.village     ||
-        a.municipality||
-        a.county      || '';
+      // primary part
+      const street = a.road ? a.road.replace(/,$/, '') : '';
+      const nr     = a.house_number ? (' ' + a.house_number) : '';
+      const place  =
+        street ? (street + nr) :
+        pick(a, ['village', 'town', 'city', 'hamlet', 'suburb']) || '';
 
-      /* 3c build final line ­––––––––––––––––––––––––––––––––––––––––– */
-      return street
-        ? locality ? `${street}, ${locality}` : street
-        : locality;                          // rural “Burveliai, …”
-    });
+      // locality / region part
+      const loc = pick(a, ['city', 'town', 'village']) ||
+                  pick(a, ['county', 'region', 'state'])    || '';
 
-    console.log('[autocomplete] →', list.length, 'rows',
-                'in', Date.now() - t0, 'ms');
-    return res.status(200).json(list);
-  } catch (err) {
-    console.error('[autocomplete] error:', err.message);
-    return res.status(502).json({ error: err.message });
+      return [place, loc].filter(Boolean).join(', ');
+    })
+    // drop empties and duplicates, keep first 5
+    .filter(Boolean)
+    .filter((v, i, arr) => arr.indexOf(v) === i)
+    .slice(0, 5);
+
+    return res.status(200).json(nice);
+  } catch (e) {
+    return res.status(502).json({ error: e.message });
+  } finally {
+    console.log('[autocomplete]', q, '->', Date.now() - t0, 'ms');
   }
 }
